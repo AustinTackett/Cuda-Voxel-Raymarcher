@@ -1,11 +1,14 @@
 #pragma once
 
-#include <array>
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <stack>
 #include <vector>
 #include <cstddef>
+
+#include <cuda_runtime.h>
+#include <helper_math.h>
 
 #include "ogt_vox.h"
 
@@ -20,18 +23,14 @@ constexpr unsigned int BRICK_SIZE = BRICK_DIM_X * BRICK_DIM_Y * BRICK_DIM_Z;
 
 struct Aabb
 {
-    unsigned int minX; 
-    unsigned int minY; 
-    unsigned int minZ;
-    unsigned int maxX; 
-    unsigned int maxY; 
-    unsigned int maxZ;
+    float3 min;
+    float3 max;
 };
 
 template<typename T>
 struct Brick
 {
-    std::array<T, BRICK_SIZE> data;
+    T data[BRICK_SIZE];
 };
 
 template<typename T>
@@ -48,26 +47,7 @@ struct BrickTreeNode
         T   backgroundValue;
     } data;
 
-    // 8 Children
-    int child1 = -1;
-    int child2 = -1;
-    int child3 = -1;
-    int child4 = -1;
-    int child5 = -1;
-    int child6 = -1;
-    int child7 = -1;
-    int child8 = -1;
-
-    // Get children index in tree using indices like a 3d array
-    int fetchChildIndex(unsigned int localX, unsigned int localY, unsigned int localZ) const
-    {
-        assert(localX < 2 && localY < 2 && localZ < 2);
-        if (localX >= 2 || localY >= 2 || localZ >= 2) return -1;
-        const int children[8] = {
-            child1, child2, child3, child4, child5, child6, child7, child8
-        };
-        return children[localX + 2 * localY + 4 * localZ];
-    }
+    unsigned int children[8];
 
     // Aabb
     Aabb aabb;
@@ -89,7 +69,16 @@ struct BrickTree
     // Data
     std::vector<BrickTreeNode<T>> nodes;
     std::vector<Brick<T>>         bricks;
+    uchar4 palette[256];
 };
+
+inline void SetPalleteBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_scene* scene)
+{
+    for (unsigned int i = 0; i < 256; ++i) {
+        const ogt_vox_rgba& c = scene->palette.color[i];
+        outTree.palette[i] = make_uchar4(c.r, c.g, c.b, c.a);
+    }
+}
 
 inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* model)
 {
@@ -126,9 +115,9 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
 
     // check that every cell isn't occupied
     auto isBackground = [&](Aabb& aabb) -> bool {
-        for (size_t z = aabb.minZ; z < aabb.maxZ; ++z) {
-            for (size_t y = aabb.minY; y < aabb.maxY; ++y) {
-                for (size_t x = aabb.minX; x < aabb.maxX; ++x) {
+        for (size_t z = aabb.min.z; z < aabb.max.z; ++z) {
+            for (size_t y = aabb.min.y; y < aabb.max.y; ++y) {
+                for (size_t x = aabb.min.x; x < aabb.max.x; ++x) {
                     bool occupied = fetchVoxelData(x, y, z) != 0;
                     if (occupied) return false;
         }}}    
@@ -137,15 +126,16 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
 
     // check that aabb has shrunk to a size we consider a brick
     auto isBrick = [](Aabb& aabb) -> bool {
-        return aabb.maxX - aabb.minX <= BRICK_DIM_X 
-            && aabb.maxY - aabb.minY <= BRICK_DIM_Y 
-            && aabb.maxZ - aabb.minZ <= BRICK_DIM_Z;
+        const float3 extent = aabb.max - aabb.min;
+        return extent.x <= BRICK_DIM_X
+            && extent.y <= BRICK_DIM_Y
+            && extent.z <= BRICK_DIM_Z;
     };
 
     // Root node
     Aabb rootAabb = { 
-        0, 0, 0, 
-        outTree.grid_size_x, outTree.grid_size_y, outTree.grid_size_z
+        make_float3(0.0f),
+        make_float3(static_cast<float>(gridSize))
     };
     BrickTreeNode<uint8_t> rootNode = {};
     rootNode.type = BrickTreeNode<uint8_t>::INTERNAL_NODE;
@@ -179,9 +169,9 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
 
             // Copy Data into brick
             unsigned int localIndex = 0;
-            for (size_t z = node.aabb.minZ; z < node.aabb.maxZ; ++z) {
-                for (size_t y = node.aabb.minY; y < node.aabb.maxY; ++y) {
-                    for (size_t x = node.aabb.minX; x < node.aabb.maxX; ++x) {
+            for (size_t z = node.aabb.min.z; z < node.aabb.max.z; ++z) {
+                for (size_t y = node.aabb.min.y; y < node.aabb.max.y; ++y) {
+                    for (size_t x = node.aabb.min.x; x < node.aabb.max.x; ++x) {
                         uint8_t palleteIndex = fetchVoxelData(x, y, z);
                         brick.data[localIndex++] = palleteIndex; 
             }}}  
@@ -191,37 +181,31 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
         // Initialize and add 8 children nodes to tree and stack
         const Aabb a = node.aabb;
         const unsigned int firstChild = static_cast<unsigned int>(outTree.nodes.size());
-        const unsigned int midX = a.minX + (a.maxX - a.minX) / 2;
-        const unsigned int midY = a.minY + (a.maxY - a.minY) / 2;
-        const unsigned int midZ = a.minZ + (a.maxZ - a.minZ) / 2;
+        const float3 midpoint = a.min + (a.max - a.min) * 0.5f;
         for (unsigned int i = 0; i < 8; ++i) {
             Aabb childAabb = {
-                (i & 1) ? midX : a.minX,
-                (i & 2) ? midY : a.minY,
-                (i & 4) ? midZ : a.minZ,
-                (i & 1) ? a.maxX : midX,
-                (i & 2) ? a.maxY : midY,
-                (i & 4) ? a.maxZ : midZ
+                make_float3(
+                    (i & 1) ? midpoint.x : a.min.x,
+                    (i & 2) ? midpoint.y : a.min.y,
+                    (i & 4) ? midpoint.z : a.min.z),
+                make_float3(
+                    (i & 1) ? a.max.x : midpoint.x,
+                    (i & 2) ? a.max.y : midpoint.y,
+                    (i & 4) ? a.max.z : midpoint.z)
             };
 
+            // make child node
             BrickTreeNode<uint8_t> childNode = {};
             childNode.type = BrickTreeNode<uint8_t>::INTERNAL_NODE;
             childNode.aabb = childAabb;
             
+            // set child pointer
+            outTree.nodes[nodeIndex].children[i] = firstChild + i;
+
+            // push to tree and stack
             outTree.nodes.push_back(childNode);    
             nodeIndices.push(firstChild + i);
         }
-
-        // set child pointers for parrent node
-        auto& parent = outTree.nodes[nodeIndex];
-        parent.child1 = firstChild;
-        parent.child2 = firstChild + 1;
-        parent.child3 = firstChild + 2;
-        parent.child4 = firstChild + 3;
-        parent.child5 = firstChild + 4;
-        parent.child6 = firstChild + 5;
-        parent.child7 = firstChild + 6;
-        parent.child8 = firstChild + 7;
     }
 };
 

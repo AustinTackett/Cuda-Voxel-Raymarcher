@@ -3,7 +3,6 @@ project(CudaVolumeRenderer LANGUAGES C CXX CUDA)
 include(FetchContent)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Dependencies.
 FetchContent_Declare(crrt
     GIT_REPOSITORY https://github.com/AustinTackett/crrt.git
     GIT_TAG v0.0.2
@@ -11,18 +10,27 @@ FetchContent_Declare(crrt
 FetchContent_Declare(opengametools
     GIT_REPOSITORY https://github.com/jpaver/opengametools.git
     GIT_TAG 17b41f906392dba8636a70554f0b21d3739ca514
-    # Only consume the headers; skip upstream's standalone apps and tests.
     SOURCE_SUBDIR src
 )
+FetchContent_Declare(cuda_math
+    URL https://raw.githubusercontent.com/NVIDIA/cuda-samples/master/Common/helper_math.h
+    DOWNLOAD_NO_EXTRACT TRUE
+    DOWNLOAD_NAME helper_math.h
+    TIMEOUT 30
+)
 
-FetchContent_MakeAvailable(crrt opengametools)
+FetchContent_MakeAvailable(crrt opengametools cuda_math)
 
 add_executable(CudaVolumeRenderer
     main.cpp
-    "${crrt_SOURCE_DIR}/examples/debug-colors/DebugKernel.cu"
+    kernels/Draw.cu
+    kernels/RayMarch.cu
+    kernels/TraceBrickTree.cu
 )
 target_include_directories(CudaVolumeRenderer PRIVATE
-    "${crrt_SOURCE_DIR}/examples/debug-colors"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels"
+    "${cuda_math_SOURCE_DIR}"
     "${opengametools_SOURCE_DIR}/src"
 )
 target_link_libraries(CudaVolumeRenderer PRIVATE CRRT)
@@ -32,7 +40,7 @@ set_target_properties(CudaVolumeRenderer PROPERTIES
     CXX_EXTENSIONS OFF
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
-    CUDA_ARCHITECTURES native
+    CUDA_ARCHITECTURES all-major
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )

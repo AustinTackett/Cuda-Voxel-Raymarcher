@@ -8,7 +8,7 @@
 
 #include "BrickTree.hpp"
 
-static bool LoadVox(const std::string& filePath, BrickTree<uint8_t>& brickMap, std::string& error, uint32_t scene_read_flags = 0)
+bool LoadVoxels(const std::string& filePath, BrickTree<uint8_t>& brickMap, std::string& error, uint32_t scene_read_flags = 0)
 {
     FILE* fp = nullptr;
     if (fopen_s(&fp, filePath.c_str(), "rb") != 0 || !fp) {
@@ -43,6 +43,7 @@ static bool LoadVox(const std::string& filePath, BrickTree<uint8_t>& brickMap, s
     }
 
     BuildBrickTree(brickMap, model);
+    SetPalleteBrickTree(brickMap, scene);
 
     delete[] buffer;
     ogt_vox_destroy_scene(scene);
