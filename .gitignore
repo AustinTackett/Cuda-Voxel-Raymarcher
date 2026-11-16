@@ -1,0 +1,9 @@
+/.vs/
+/.vscode/
+/build/
+/backups/
+
+.clangd
+commands.md
+
+*.zip
