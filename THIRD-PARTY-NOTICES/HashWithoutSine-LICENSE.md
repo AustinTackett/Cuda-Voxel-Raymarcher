@@ -1,4 +1,5 @@
 Hash without Sine
+
 Copyright (c)2014 David Hoskins.
 
 MIT License
