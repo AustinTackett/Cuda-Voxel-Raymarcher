@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(CudaVolumeRenderer LANGUAGES C CXX CUDA)
+project(cuda-voxel-raymarcher LANGUAGES C CXX CUDA)
 include(FetchContent)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -21,21 +21,21 @@ FetchContent_Declare(cuda_math
 
 FetchContent_MakeAvailable(crrt opengametools cuda_math)
 
-add_executable(CudaVolumeRenderer
+add_executable(cuda-voxel-raymarcher
     main.cpp
     kernels/Draw.cu
     kernels/RayMarch.cu
     kernels/TraceBrickTree.cu
 )
-target_include_directories(CudaVolumeRenderer PRIVATE
+target_include_directories(cuda-voxel-raymarcher PRIVATE
     "${cuda_math_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda"
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels"
     "${opengametools_SOURCE_DIR}/src"
 )
-target_link_libraries(CudaVolumeRenderer PRIVATE CRRT)
-set_target_properties(CudaVolumeRenderer PROPERTIES
+target_link_libraries(cuda-voxel-raymarcher PRIVATE CRRT)
+set_target_properties(cuda-voxel-raymarcher PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
