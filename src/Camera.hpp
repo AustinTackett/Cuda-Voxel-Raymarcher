@@ -40,6 +40,7 @@ struct Camera
         orientation = yawRotation.multiply(pitchRotation).multiply(zUpRotation).normalized();
     }
 
+    // on frame change
     void update() {
         using Input = CRRT::Input;
 
@@ -51,11 +52,11 @@ struct Camera
         if (dot(forwardDir, forwardDir) > 1e-12f) forwardDir = normalize(forwardDir);
         else forwardDir = make_float3(0.0f);
 
-        if (Input::KEY_W || Input::KEY_UP)        position += forwardDir * distance;
-        else if (Input::KEY_S || Input::KEY_DOWN) position -= forwardDir * distance;
+        if      (Input::KEY_W || Input::KEY_UP)    position += forwardDir * distance;
+        else if (Input::KEY_S || Input::KEY_DOWN)  position -= forwardDir * distance;
         
-        if (Input::KEY_D || Input::KEY_RIGHT)     position += rightDir * distance;
-        else if (Input::KEY_A || Input::KEY_LEFT) position -= rightDir * distance;
+        if      (Input::KEY_D || Input::KEY_RIGHT) position += rightDir * distance;
+        else if (Input::KEY_A || Input::KEY_LEFT)  position -= rightDir * distance;
         
         if (Input::KEY_SPACE) position += WorldZ * distance;
         if (Input::KEY_SHIFT) position -= WorldZ * distance;

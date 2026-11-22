@@ -7,9 +7,10 @@
 
 struct Quaternion 
 {
-    float data[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     // [w, x, y, z]
+    float data[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
+    // convert angle axis rotation to quaternions
     __host__ __device__ void setRotation(float3 axis, float theta) {
         axis = normalize(axis);
         data[0] = cosf(theta/2);
@@ -18,17 +19,19 @@ struct Quaternion
         data[3] = axis.z*sinf(theta/2);
     }
 
+    // quaternion quaterion multiplication (hamilton product)
     __host__ __device__ Quaternion multiply(const Quaternion& other) const {
         const float w1 = data[0], x1 = data[1], y1 = data[2], z1 = data[3];
         const float w2 = other.data[0], x2 = other.data[1], y2 = other.data[2], z2 = other.data[3];
         return Quaternion{{
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2
         }};
     }
 
+    // normalize quaternion
     __host__ __device__ Quaternion normalized() const {
         float lengthSquared = data[0]*data[0] + data[1]*data[1] + data[2]*data[2] + data[3]*data[3];
         if (lengthSquared == 0.0f) return Quaternion{};

@@ -1,4 +1,3 @@
-#include <cstddef>
 #include <cstdlib>
 #include <iostream>
 
@@ -11,6 +10,28 @@
 #include "LoadVoxels.hpp"
 #include "Camera.hpp"
 #include "Draw.hpp"
+#include "Lights.hpp"
+
+// Place camera at some reasonable orientation to view the model
+void initCamera(Camera& camera, const BrickTree& brickMap)
+{
+    const float3 modelMin = make_float3(
+        float(brickMap.offset_x), 
+        float(brickMap.offset_y), 
+        float(brickMap.offset_z));
+    const float3 modelMax = make_float3(
+        float(brickMap.grid_size_x - BACKGROUND_PADDING),
+        float(brickMap.grid_size_y - BACKGROUND_PADDING),
+        float(brickMap.grid_size_z - BACKGROUND_PADDING));
+    
+    const float3 center = (modelMin + modelMax) * 0.5f;
+    camera.position     = make_float3(center.x, modelMin.y, center.z);
+    
+    camera.yaw   = 0.0f;
+    camera.pitch = 0.0f;
+    camera.speed = fmaxf(length(modelMax - modelMin) * 0.25f, 3.0f);
+    camera.updateOrientation();
+}
 
 int main(int argc, char* argv[])
 {
@@ -32,8 +53,8 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    // Load Model to CPU
-    BrickTree<uint8_t> brickMap;
+    // Load CPU data
+    BrickTree brickMap;
     std::string loadError;
     if (!LoadVoxels(argv[1], brickMap, loadError)) {
         std::cerr << loadError << '\n';
@@ -41,63 +62,52 @@ int main(int argc, char* argv[])
         if (errors) std::cerr << GetErrorsString(errors);
         return EXIT_FAILURE;
     }
-
-    // Load Model to GPU
-    BrickTreeNode<uint8_t>* d_nodes = nullptr;
-    Brick<uint8_t>* d_bricks = nullptr;
-    uchar4* d_palette = nullptr;
-    const size_t nodesBytes   = brickMap.nodes.size() * sizeof(BrickTreeNode<uint8_t>);
-    const size_t bricksBytes  = brickMap.bricks.size() * sizeof(Brick<uint8_t>);
-    const size_t paletteBytes = sizeof(brickMap.palette);
-    cudaMalloc(&d_nodes, nodesBytes);
-    cudaMemcpy(d_nodes, brickMap.nodes.data(), nodesBytes, cudaMemcpyHostToDevice);
-    if (bricksBytes > 0) {
-        cudaMalloc(&d_bricks, bricksBytes);
-        cudaMemcpy(d_bricks, brickMap.bricks.data(), bricksBytes, cudaMemcpyHostToDevice);  
-    }
-    cudaMalloc(&d_palette, paletteBytes);
-    cudaMemcpy(d_palette, brickMap.palette, paletteBytes, cudaMemcpyHostToDevice);
-
-    auto releaseCuda = [&]() -> void {
-        cudaFree(d_palette);
-        cudaFree(d_bricks);
-        cudaFree(d_nodes);
-    };
+    Lights lights;
+    lights.directionalLights.push_back({
+        normalize(make_float3(1.0f, 1.0f, -1.0f)), 
+        make_float3(1.5f)
+    });
 
     // Initialize Scene/Camera Parameters
     Camera camera;
-    const float3 modelMin = make_float3(
-        float(brickMap.offset_x), 
-        float(brickMap.offset_y), 
-        float(brickMap.offset_z));
-    const float3 modelMax = make_float3(
-        float(brickMap.grid_size_x), 
-        float(brickMap.grid_size_y), 
-        float(brickMap.grid_size_z));
-    
-    const float3 center = (modelMin + modelMax) * 0.5f;
-    const float radius = length(modelMax - modelMin) * 0.5f;
-    const float aspect = float(windowConfig.resWidth) / windowConfig.resHeight;
-    const float halfFov = atanf(tanf(camera.fov * 0.5f) * fminf(aspect, 1.0f));
-    const float distance = radius / sinf(halfFov);
-    camera.position = center + normalize(make_float3(0.0f, -1.0f, 0.5f)) * distance;
-    
-    const float3 forward = normalize(center - camera.position);
-    camera.yaw = atan2f(-forward.x, forward.y);
-    camera.pitch = asinf(forward.z);
-    camera.speed = fmaxf(radius * 0.5f, 3.0f);
-    camera.updateOrientation();
+    initCamera(camera, brickMap);
 
-    // Draw Call back
-    auto draw = [&](CRRT::FrameView frame) {
-        camera.update();
-        Draw(frame, camera, d_nodes, d_bricks, d_palette);
+    // GPU resources
+    CudaBrickTree deviceTree;
+    CudaLights deviceLights;
+    auto releaseCuda = [&]() {
+        bool success = ReleaseBrickTree(deviceTree);
+        if (!success) std::cerr << "Brick tree release failed.\n";
+        bool lightsReleased = ReleaseLights(deviceLights);
+        if (!lightsReleased) std::cerr << "Lights release failed.\n";
+        return success && lightsReleased;
     };
 
-    // Main Draw Loop
+    // Upload CPU data to GPU
+    if (!UploadLights(lights, deviceLights)) {
+        std::cerr << "Lights upload failed.\n";
+        releaseCuda();
+        errors |= CRRT::ReleaseWindow();
+        if (errors) std::cerr << GetErrorsString(errors);
+        return EXIT_FAILURE;
+    }
+    if (!UploadBrickTree(brickMap, deviceTree)) {
+        std::cerr << "Brick tree upload failed.\n";
+        errors |= CRRT::ReleaseWindow();
+        if (errors) std::cerr << GetErrorsString(errors);
+        return EXIT_FAILURE;
+    }
+
+    // Draw Call back
+    auto onWindowUpdate = [&](CRRT::FrameView frame) {
+        camera.update();
+        Draw(frame, deviceTree, camera, deviceLights);
+    };
+
+    // Main Window Update Loop
     while (!CRRT::ShouldClose()) {  
 
-        errors |= CRRT::UpdateWindow(draw);
+        errors |= CRRT::UpdateWindow(onWindowUpdate);
         if (errors) {
             releaseCuda();
             errors |= CRRT::ReleaseWindow();
@@ -113,9 +123,9 @@ int main(int argc, char* argv[])
         CRRT::SwapBuffer(); 
     }
 
-    releaseCuda();
+    bool released = releaseCuda();
     errors |= CRRT::ReleaseWindow();
     std::cout << GetErrorsString(errors);
-    return errors ? EXIT_FAILURE : EXIT_SUCCESS;
+    return errors || !released ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 

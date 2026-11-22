@@ -28,9 +28,10 @@ add_executable(CudaVolumeRenderer
     kernels/TraceBrickTree.cu
 )
 target_include_directories(CudaVolumeRenderer PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/kernels"
     "${cuda_math_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda"
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels"
     "${opengametools_SOURCE_DIR}/src"
 )
 target_link_libraries(CudaVolumeRenderer PRIVATE CRRT)

@@ -1,14 +1,15 @@
 # pragma once
 
 #include <cuda_runtime.h>
+#include "CudaBrickTree.hpp"
 
-#include "BrickTree.hpp" 
-
+/*
+    Ray 
+*/
 struct Ray 
 {
     float3 o;
     float3 d;    
-    float  t;
 };
 
 struct AabbHit
@@ -18,10 +19,16 @@ struct AabbHit
     float  tMax;
 };
 
-struct VoxelHit
+struct BrickTreeHit
 {
     bool    isHit;
-    uint8_t pallete;
+    uint8_t material;
+    float3  position;
+    float3  normal;
+    float   t;
 };
 
-__device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<uint8_t>* bricks);
+// Default tracing ignores the background material.
+__device__ BrickTreeHit TraceBrickTree(const CudaBrickTree& tree, Ray ray);
+
+__device__ BrickTreeHit TraceBrickTree(const CudaBrickTree& tree, Ray ray, uint ignoreMaterial);

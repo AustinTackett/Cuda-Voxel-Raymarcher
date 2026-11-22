@@ -11,29 +11,30 @@
 #include <helper_math.h>
 
 #include "ogt_vox.h"
+#include "Material.hpp"
+#include "Aabb.hpp"
 
 /*
     Sparse Voxel Octree using Brick Maps
 */
 
+/*
+    Constants
+*/
 constexpr unsigned int BRICK_DIM_X = 8;
 constexpr unsigned int BRICK_DIM_Y = 8;
 constexpr unsigned int BRICK_DIM_Z = 8;
 constexpr unsigned int BRICK_SIZE = BRICK_DIM_X * BRICK_DIM_Y * BRICK_DIM_Z;
+constexpr unsigned int BACKGROUND_PADDING = 1;
 
-struct Aabb
-{
-    float3 min;
-    float3 max;
-};
-
-template<typename T>
+/*
+    Brick Tree
+*/
 struct Brick
 {
-    T data[BRICK_SIZE];
+    uint8_t data[BRICK_SIZE];
 };
 
-template<typename T>
 struct BrickTreeNode
 {
     enum NodeType {
@@ -44,7 +45,7 @@ struct BrickTreeNode
 
     union {
         int brickIndex;
-        T   backgroundValue;
+        uint8_t backgroundValue;
     } data;
 
     unsigned int children[8];
@@ -53,7 +54,6 @@ struct BrickTreeNode
     Aabb aabb;
 };
 
-template<typename T>
 struct BrickTree
 {
     // Size of bricktree volume including padding
@@ -66,47 +66,56 @@ struct BrickTree
     unsigned int offset_y = 0;
     unsigned int offset_z = 0;
 
-    // Data
-    std::vector<BrickTreeNode<T>> nodes;
-    std::vector<Brick<T>>         bricks;
-    uchar4 palette[256];
+    // Voxel Data
+    std::vector<BrickTreeNode> nodes;
+    std::vector<Brick>         bricks;
+
+    // Voxel Material Data
+    Material materials[256];
 };
 
-inline void SetPalleteBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_scene* scene)
+inline void SetMaterialBrickTree(BrickTree& outTree, const ogt_vox_scene* scene)
 {
-    for (unsigned int i = 0; i < 256; ++i) {
-        const ogt_vox_rgba& c = scene->palette.color[i];
-        outTree.palette[i] = make_uchar4(c.r, c.g, c.b, c.a);
+    // .vox index 0 is empty space; assign the renderer's background properties.
+    outTree.materials[BACKGROUND_MAT_INDEX] = Material{
+        false, {1.0f, 1.0f, 1.0f}, 0.0f, 1.0f,
+        1.0f, {0.0f, 0.0f, 0.0f}};
+    for (unsigned int i = 1; i < 256; ++i) {
+        const ogt_vox_rgba& color = scene->palette.color[i];
+        outTree.materials[i] = ParseMaterial(scene->materials.matl[i],
+            make_uchar4(color.r, color.g, color.b, color.a));
     }
 }
 
-inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* model)
+inline void BuildBrickTree(BrickTree& outTree, const ogt_vox_model* model)
 {
     outTree.nodes.clear();
     outTree.bricks.clear();
 
-    // find minimum dimensions of bounding cube 
+    // Keep background on every side so material exits use ordinary traversal.
     unsigned int gridSize = std::max({BRICK_DIM_X, BRICK_DIM_Y, BRICK_DIM_Z});
-    while (gridSize < model->size_x || gridSize < model->size_y || gridSize < model->size_z)
+    while (gridSize < model->size_x + 2 * BACKGROUND_PADDING ||
+           gridSize < model->size_y + 2 * BACKGROUND_PADDING ||
+           gridSize < model->size_z + 2 * BACKGROUND_PADDING)
         gridSize *= 2;
 
     outTree.grid_size_x = gridSize;
     outTree.grid_size_y = gridSize;
     outTree.grid_size_z = gridSize;
-    outTree.offset_x = outTree.grid_size_x - model->size_x;
-    outTree.offset_y = outTree.grid_size_y - model->size_y;
-    outTree.offset_z = outTree.grid_size_z - model->size_z;
+    outTree.offset_x = outTree.grid_size_x - model->size_x - BACKGROUND_PADDING;
+    outTree.offset_y = outTree.grid_size_y - model->size_y - BACKGROUND_PADDING;
+    outTree.offset_z = outTree.grid_size_z - model->size_z - BACKGROUND_PADDING;
 
-    // get voxel data (pallete index)
+    // Get voxel data (material index).
     auto fetchVoxelData = [&](unsigned int x, unsigned int y, unsigned int z) -> uint8_t {
         if (x < outTree.offset_x || y < outTree.offset_y || z < outTree.offset_z)
-            return 0;
+            return BACKGROUND_MAT_INDEX;
         if (x - outTree.offset_x >= model->size_x ||
             y - outTree.offset_y >= model->size_y ||
             z - outTree.offset_z >= model->size_z)
-            return 0;
+            return BACKGROUND_MAT_INDEX;
 
-        size_t index = 
+        size_t index =
             (x - outTree.offset_x) +
             (y - outTree.offset_y) * size_t(model->size_x) +
             (z - outTree.offset_z) * size_t(model->size_x) * size_t(model->size_y);
@@ -118,10 +127,10 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
         for (size_t z = aabb.min.z; z < aabb.max.z; ++z) {
             for (size_t y = aabb.min.y; y < aabb.max.y; ++y) {
                 for (size_t x = aabb.min.x; x < aabb.max.x; ++x) {
-                    bool occupied = fetchVoxelData(x, y, z) != 0;
+                    bool occupied = fetchVoxelData(x, y, z) != BACKGROUND_MAT_INDEX;
                     if (occupied) return false;
-        }}}    
-        return true; 
+        }}}
+        return true;
     };
 
     // check that aabb has shrunk to a size we consider a brick
@@ -133,12 +142,12 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
     };
 
     // Root node
-    Aabb rootAabb = { 
+    Aabb rootAabb = {
         make_float3(0.0f),
         make_float3(static_cast<float>(gridSize))
     };
-    BrickTreeNode<uint8_t> rootNode = {};
-    rootNode.type = BrickTreeNode<uint8_t>::INTERNAL_NODE;
+    BrickTreeNode rootNode = {};
+    rootNode.type = BrickTreeNode::INTERNAL_NODE;
     rootNode.aabb = rootAabb;
     outTree.nodes.push_back(rootNode);
 
@@ -149,34 +158,34 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
         // Get Top Node
         unsigned int nodeIndex = nodeIndices.top();
         nodeIndices.pop();
-        BrickTreeNode<uint8_t>& node = outTree.nodes[nodeIndex];
+        BrickTreeNode& node = outTree.nodes[nodeIndex];
 
         // Check if it is unoccupied
         if (isBackground(node.aabb)) {
-            node.type = BrickTreeNode<uint8_t>::LEAF_NODE_BACKGROUND; 
-            node.data.backgroundValue = 0;
+            node.type = BrickTreeNode::LEAF_NODE_BACKGROUND;
+            node.data.backgroundValue = BACKGROUND_MAT_INDEX;
             continue;
         }
 
         // Check if size constitutes a brick
         if (isBrick(node.aabb)) {
-            node.type = BrickTreeNode<uint8_t>::LEAF_NODE_BRICK;
+            node.type = BrickTreeNode::LEAF_NODE_BRICK;
             node.data.brickIndex = outTree.bricks.size();
 
             // Create brick
             outTree.bricks.emplace_back();
-            Brick<uint8_t>& brick = outTree.bricks.back();
+            Brick& brick = outTree.bricks.back();
 
             // Copy Data into brick
             unsigned int localIndex = 0;
             for (size_t z = node.aabb.min.z; z < node.aabb.max.z; ++z) {
                 for (size_t y = node.aabb.min.y; y < node.aabb.max.y; ++y) {
                     for (size_t x = node.aabb.min.x; x < node.aabb.max.x; ++x) {
-                        uint8_t palleteIndex = fetchVoxelData(x, y, z);
-                        brick.data[localIndex++] = palleteIndex; 
-            }}}  
+                        uint8_t materialIndex = fetchVoxelData(x, y, z);
+                        brick.data[localIndex++] = materialIndex;
+            }}}
             continue;
-        }    
+        }
 
         // Initialize and add 8 children nodes to tree and stack
         const Aabb a = node.aabb;
@@ -195,15 +204,15 @@ inline void BuildBrickTree(BrickTree<uint8_t>& outTree, const ogt_vox_model* mod
             };
 
             // make child node
-            BrickTreeNode<uint8_t> childNode = {};
-            childNode.type = BrickTreeNode<uint8_t>::INTERNAL_NODE;
+            BrickTreeNode childNode = {};
+            childNode.type = BrickTreeNode::INTERNAL_NODE;
             childNode.aabb = childAabb;
-            
+
             // set child pointer
             outTree.nodes[nodeIndex].children[i] = firstChild + i;
 
             // push to tree and stack
-            outTree.nodes.push_back(childNode);    
+            outTree.nodes.push_back(childNode);
             nodeIndices.push(firstChild + i);
         }
     }

@@ -1,8 +1,10 @@
+#include "BrickTree.hpp"
 #include "TraceBrickTree.hpp"
 
 #include <cmath>
 #include <cstdint>
 
+#include <device_types.h>
 #include <helper_math.h>
 #include <math_constants.h>
 
@@ -10,17 +12,28 @@
     Device Functions for Traversing Brick Tree
 */
 
-__device__ __forceinline__ bool AnyLess(int3 v, int3 threshold)
+/*
+    Math Utils
+*/
+__device__ __forceinline__ bool anyLess(int3 v, int3 threshold)
 {
     return v.x < threshold.x || v.y < threshold.y || v.z < threshold.z;
 }
 
-__device__ __forceinline__ bool AnyGreaterEqual(int3 v, int3 threshold)
+__device__ __forceinline__ bool anyGreaterEqual(int3 v, int3 threshold)
 {
     return v.x >= threshold.x || v.y >= threshold.y || v.z >= threshold.z;
 }
 
-__device__ AabbHit AabbIntersect(const Ray& ray, const Aabb& aabb) 
+__device__ __forceinline__ uint argMax(float3 v)
+{
+    return (v.x >= v.y) ? ((v.x >= v.z) ? 0 : 2) : ((v.y >= v.z) ? 1 : 2);
+}
+
+/*
+    Aabb intersections
+*/
+__device__ AabbHit AabbIntersect(Ray ray, Aabb aabb) 
 {
     AabbHit hit {false, 0.0,  CUDART_INF_F};
 
@@ -32,7 +45,8 @@ __device__ AabbHit AabbIntersect(const Ray& ray, const Aabb& aabb)
 
         // check if origin is in side line segment if direction is parrallel
         if (rayDirectionAxis == 0.0) {
-            if (rayOriginAxis <= aabbMinAxis || rayOriginAxis >= aabbMaxAxis) {
+            // Assign shared faces to exactly one node: [min, max).
+            if (rayOriginAxis < aabbMinAxis || rayOriginAxis >= aabbMaxAxis) {
                 return hit;
             }
             continue;
@@ -55,17 +69,55 @@ __device__ AabbHit AabbIntersect(const Ray& ray, const Aabb& aabb)
     return hit;
 }
 
-__device__ constexpr uint MAX_RAY_STEPS = 2048;
-__device__ constexpr int MAX_STACK_DEPTH = 64;
+/*
+    Voxel Intersections
+*/
+
+// index in voxel of ray brick intersection
+__device__ __forceinline__ int3 GetVoxelCell(Aabb aabb, Ray ray, float t)
+{
+    const float3 voxelCellSize = (aabb.max - aabb.min) / float(BRICK_DIM_X);
+    const float3 voxelCellf    = (ray.o + t * ray.d - aabb.min) / voxelCellSize;
+    const int3 voxelCell = make_int3(
+        ray.d.x < 0 ? int(ceilf(voxelCellf.x)) - 1 : int(floorf(voxelCellf.x)),
+        ray.d.y < 0 ? int(ceilf(voxelCellf.y)) - 1 : int(floorf(voxelCellf.y)),
+        ray.d.z < 0 ? int(ceilf(voxelCellf.z)) - 1 : int(floorf(voxelCellf.z))
+    );
+    // check bounds
+    return clamp(voxelCell, make_int3(0), make_int3(BRICK_DIM_X - 1));
+}
+
+// normal of face of ray voxel intersection
+__device__ __forceinline__ float3 GetHitNormal(float3 entryT, int3 stepDir)
+{
+    if (fmaxf(entryT.x, fmaxf(entryT.y, entryT.z)) < 0) return make_float3(0);
+    uint faceHit = argMax(entryT);
+    return faceHit == 0 ? make_float3(-stepDir.x, 0, 0) :
+           faceHit == 1 ? make_float3(0, -stepDir.y, 0) :
+           make_float3(0, 0, -stepDir.z);
+}
+
+/*
+    Voxel Ray Traversal
+*/
+__device__ constexpr uint  MAX_RAY_STEPS   = 128;
+__device__ constexpr int   MAX_STACK_DEPTH = 64;
 __device__ constexpr float EPS = 1e-20f;
 
-__device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<uint8_t>* bricks)
+__device__ BrickTreeHit TraceBrickTree(const CudaBrickTree& tree, Ray ray)
 {
+    return TraceBrickTree(tree, ray, BACKGROUND_MAT_INDEX);
+}
+
+__device__ BrickTreeHit TraceBrickTree(const CudaBrickTree& tree, Ray ray, uint ignoreMaterial)
+{
+    // Check expected square dimensions
     constexpr uint brickDim = BRICK_DIM_X;
     static_assert(BRICK_DIM_X == BRICK_DIM_Y && BRICK_DIM_X == BRICK_DIM_Z);
-    const BrickTreeNode<uint8_t>& rootNode = nodes[0];
+    
+    const BrickTreeNode& rootNode = tree.nodes[0];
     AabbHit rootHit = AabbIntersect(ray, rootNode.aabb);
-    if (!rootHit.isHit) return VoxelHit{false, 0};
+    if (!rootHit.isHit) return BrickTreeHit{false, BACKGROUND_MAT_INDEX};
 
     uint stackPtr = 0;
     uint nodeIndexStack[MAX_STACK_DEPTH];
@@ -78,46 +130,58 @@ __device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<ui
     while(stackPtr > 0) {
         --stackPtr;
         uint nodeIndex = nodeIndexStack[stackPtr];
-        const BrickTreeNode<uint8_t>& node = nodes[nodeIndex];
+        const BrickTreeNode& node = tree.nodes[nodeIndex];
 
-        // return single background value of leaf
-        if (node.type == BrickTreeNode<uint8_t>::LEAF_NODE_BACKGROUND) {
+        // On background hit (air)
+        if (node.type == BrickTreeNode::LEAF_NODE_BACKGROUND) {
+            if (BACKGROUND_MAT_INDEX != ignoreMaterial) {
+                float3 safeDir = ray.d;
+                if (safeDir.x == 0.0f) safeDir.x = EPS;
+                if (safeDir.y == 0.0f) safeDir.y = EPS;
+                if (safeDir.z == 0.0f) safeDir.z = EPS;
+
+                int3 stepDir = make_int3(
+                    (ray.d.x > 0) - (ray.d.x < 0),
+                    (ray.d.y > 0) - (ray.d.y < 0),
+                    (ray.d.z > 0) - (ray.d.z < 0));
+                
+                float3 entryT = fminf((node.aabb.min - ray.o) / safeDir, (node.aabb.max - ray.o) / safeDir);
+                float  hitTMin = nodeTminStack[stackPtr];
+                float3 hitNormal = GetHitNormal(entryT, stepDir);
+                return BrickTreeHit{true, BACKGROUND_MAT_INDEX, ray.o + ray.d * hitTMin, hitNormal, hitTMin};
+            }
             continue;
         }
 
-        // return value from brick in leaf
-        if (node.type == BrickTreeNode<uint8_t>::LEAF_NODE_BRICK) {
-            const Brick<uint8_t>& brick = bricks[node.data.brickIndex];
+        // On brick hit
+        if (node.type == BrickTreeNode::LEAF_NODE_BRICK) {
+            const Brick& brick = tree.bricks[node.data.brickIndex];
 
-            float  tMin = nodeTminStack[stackPtr];
+            // What ray hit this brick
+            float  tMin   = nodeTminStack[stackPtr];
             float3 rayPos = ray.o + tMin * ray.d;
 
+            // Get voxel spatial data
+            int3   voxelCell     = GetVoxelCell(node.aabb, ray, tMin);
             float3 voxelCellSize = (node.aabb.max - node.aabb.min) / float(brickDim);
-            float3 voxelCellf = (rayPos - node.aabb.min) / voxelCellSize;
+            float3 voxelCellMin  = node.aabb.min + make_float3(voxelCell) * voxelCellSize;
+            float3 voxelCellMax  = voxelCellMin + voxelCellSize;
 
-            // handle that voxelCellf can be negative
-            int3 voxelCell = make_int3(
-                ray.d.x < 0 ? int(ceilf(voxelCellf.x)) - 1 : int(floorf(voxelCellf.x)),
-                ray.d.y < 0 ? int(ceilf(voxelCellf.y)) - 1 : int(floorf(voxelCellf.y)),
-                ray.d.z < 0 ? int(ceilf(voxelCellf.z)) - 1 : int(floorf(voxelCellf.z))
-            ); 
-            voxelCell = clamp(voxelCell, make_int3(0), make_int3(brickDim - 1));
-
-            float3 voxelCellMin = node.aabb.min + make_float3(voxelCell) * voxelCellSize;
-            float3 voxelCellMax = voxelCellMin + voxelCellSize;
-
+            // Get direction with no 0 elements
             float3 safeDir = ray.d;
-            if (safeDir.x == 0.0f) safeDir.x = EPS;
+            if (safeDir.x == 0.0f) safeDir.x = EPS; // don't divide by zero
             if (safeDir.y == 0.0f) safeDir.y = EPS;
             if (safeDir.z == 0.0f) safeDir.z = EPS;
 
-            float3 t0 = (voxelCellMin - rayPos) /safeDir;
-            float3 t1 = (voxelCellMax - rayPos) /safeDir;
+            // Get the t to reach each axis aligned boundary
+            float3 t0 = (voxelCellMin - rayPos) / safeDir;
+            float3 t1 = (voxelCellMax - rayPos) / safeDir;
             float3 t_next = tMin + fmaxf(t0, t1);
-            if (ray.d.x == 0.0f) t_next.x = CUDART_INF_F;
+            if (ray.d.x == 0.0f) t_next.x = CUDART_INF_F; // always prioritize stepping in other directions
             if (ray.d.y == 0.0f) t_next.y = CUDART_INF_F;
             if (ray.d.z == 0.0f) t_next.z = CUDART_INF_F;
             
+            // How far is a step in each axis
             float3 t_delta = fabs(voxelCellSize / safeDir);
 
             // ivec3( sign(ray.d.x), sign(ray.d.y), sign(ray.d.z) )
@@ -132,33 +196,40 @@ __device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<ui
                 uint brickIndex = voxelCell.x +
                     voxelCell.y * brickDim +
                     voxelCell.z * brickDim * brickDim;
+                
                 uint8_t voxelData = brick.data[brickIndex];
-                bool ocupied = voxelData != 0;
-                if (ocupied) {
-                    return VoxelHit{true, voxelData};
+                if (voxelData != ignoreMaterial)
+                {
+                    float3 hitVoxelCellMin = node.aabb.min + make_float3(voxelCell) * voxelCellSize;
+                    float3 hitVoxelCellMax = hitVoxelCellMin + voxelCellSize;
+                    
+                    float3 entryT  = fminf((hitVoxelCellMin - ray.o) / safeDir, (hitVoxelCellMax - ray.o) / safeDir);
+                    float  hitTMin = fmaxf(0.0f, fmaxf(entryT.x, fmaxf(entryT.y, entryT.z)));
+
+                    float3 hitPosition = ray.o + ray.d * hitTMin;
+                    float3 hitNormal   = GetHitNormal(entryT, stepDir);
+
+                    return BrickTreeHit{true, voxelData, hitPosition, hitNormal, hitTMin};
                 };
 
-                if (t_next.x < t_next.y) {
-                    if (t_next.x < t_next.z) {
-                        t_next.x += t_delta.x;
-                        voxelCell.x += stepDir.x;
-                    } else {
-                        t_next.z += t_delta.z;
-                        voxelCell.z += stepDir.z;
-                    }
-                } else {
-                    if (t_next.y < t_next.z) {
-                        t_next.y += t_delta.y;
-                        voxelCell.y += stepDir.y;
-                    } else {
-                        t_next.z += t_delta.z;
-                        voxelCell.z += stepDir.z;
-                    }
+                // Edge-only contacts are not hits.
+                const float nextT = fminf(t_next.x, fminf(t_next.y, t_next.z));
+                if (t_next.x == nextT) {
+                    t_next.x += t_delta.x;
+                    voxelCell.x += stepDir.x;
+                }
+                if (t_next.y == nextT) {
+                    t_next.y += t_delta.y;
+                    voxelCell.y += stepDir.y;
+                }
+                if (t_next.z == nextT) {
+                    t_next.z += t_delta.z;
+                    voxelCell.z += stepDir.z;
                 }
 
-                bool outOfBounds = 
-                    AnyLess(voxelCell, {0, 0, 0}) ||
-                    AnyGreaterEqual(voxelCell, {brickDim, brickDim, brickDim});
+                // Ray terminates when the next step leaves the brick
+                bool outOfBounds = anyLess(voxelCell, {0, 0, 0}) ||
+                    anyGreaterEqual(voxelCell, {brickDim, brickDim, brickDim});
                 if (outOfBounds) {
                     break;
                 }
@@ -168,15 +239,15 @@ __device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<ui
         }
 
         // Add child nodes that intersect ray
-        if (node.type == BrickTreeNode<uint8_t>::INTERNAL_NODE) {
+        if (node.type == BrickTreeNode::INTERNAL_NODE) {
             // intersect all children
             uint  hitCount = 0;
             float tMins[8];
             uint  childHitIndices[8];
             for (int i = 0; i < 8; ++i) {
                 uint childIndex = node.children[i];
-                const BrickTreeNode<uint8_t>& childNode = nodes[childIndex];
-                AabbHit aabbHit = AabbIntersect(ray, childNode.aabb);
+                const BrickTreeNode& childNode = tree.nodes[childIndex];
+                AabbHit aabbHit = AabbIntersect(ray,childNode.aabb);
                 if (!aabbHit.isHit) continue;
 
                 // Add hits in sorted list by ascending tMin (insertion sort)
@@ -193,7 +264,6 @@ __device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<ui
                 ++hitCount;
             }
 
-            // check for stack overflow
             if (stackPtr + hitCount > MAX_STACK_DEPTH) {
                 // STACK OVERFLOW !
                 continue;
@@ -211,5 +281,7 @@ __device__ VoxelHit TraceVoxel(Ray& ray, BrickTreeNode<uint8_t>* nodes, Brick<ui
         }
     }
 
-    return VoxelHit{false, 0};
+    return BrickTreeHit{false, BACKGROUND_MAT_INDEX};
 }
+
+

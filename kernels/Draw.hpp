@@ -1,7 +1,11 @@
 #pragma once
 
 #include <CRRT.hpp>
-#include "BrickTree.hpp"
+#include "CudaBrickTree.hpp"
 #include "Camera.hpp"
+#include "CudaLights.hpp"
 
-void Draw(CRRT::FrameView frame, const Camera& camera, BrickTreeNode<uint8_t>* nodes, Brick<uint8_t>* bricks, uchar4* palette);
+/*
+    Accessors for Cuda kernel launching in host code
+*/
+void Draw(CRRT::FrameView frame, const CudaBrickTree& tree, const Camera& camera, const CudaLights& lights);
