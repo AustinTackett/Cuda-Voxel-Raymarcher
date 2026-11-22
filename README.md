@@ -109,7 +109,7 @@ cmake --build --preset vs-debug
 
 ```powershell
 // Usage
-build/vs2022/Release/cuda-voxel-raymarcher.exe <.vox file path>
+.\build/vs2022/Release/cuda-voxel-raymarcher.exe <.vox file path>
 
 // Example
 .\build\vs2022\Release\cuda-voxel-raymarcher.exe .\assets\monu6.vox
