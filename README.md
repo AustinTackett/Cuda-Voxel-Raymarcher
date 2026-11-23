@@ -50,7 +50,7 @@ Unfortunately, I am not including the microfacet properties of glass such as "ro
 
 ## Rendering in a Nutshell
 
-1. Construct sparse oct-tree where the leaves with non-empty data store 8x8x8 voxels, called "bricks," and empty regions are grouped into leaves containing a single "background" value.
+1. Construct sparse oct-tree where non-empty groups of 8x8x8 voxels are stored in leaf nodes, called "bricks," and empty regions are grouped into leaves containing a single "background" value.
 
 2. "March" rays from the camera through the oct-tree to compute direct visibility. 
 
